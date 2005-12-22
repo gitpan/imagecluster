@@ -1,0 +1,255 @@
+#!/usr/bin/perl
+
+#   This program is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation; version 2 of the License
+ 
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+ 
+#   You should have received a copy of the GNU General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+
+#   Copyright 2005 Sean Dague <sean at dague dot net>
+
+=head1 NAME
+
+imagecluster - clusters and renames image files based on exif tags
+
+=head1 SYNOPSIS
+
+imagecluster -v -d /home/myuser/imagegallery -t 72 *JPG
+
+=head1 DESCRIPTION
+
+The inspiration for this program came from recently getting a new
+Canon SD500 camera to replace my Canon S30 that I'd had for years.
+The upside, the Canon SD500 rocks!  The downside, I now have 2 cameras
+that are burning through the same sequence numbers, so my previous
+solution of just putting all the files in to directories by the first
+2 digits of the sequence numbers was no longer going to work.
+
+Imagecluster solves this problem, plus another grouping problem that
+I'd been thinking about, by extracting the CreateDate and FileNumber
+exif tags from the images, and using that as the basis of a new
+filename (typically YYYY:mm:dd_HH:MM:SS_FileNumber.jpg).  This ensures
+that 2 images taken at the same second have an even smaller chance of
+colliding, as their camera sequence numbers would have to also be the
+same at that second.
+
+But that is just the first step.  I have noticed that I am an
+occational photographer, so take pictures in bursts, often for a
+weekend of hanging out with folks, though sometimes for a vacation as
+well.  This got me thinking.  What I really needed is a tool that also
+creates directories that allows for some minimum tollerance between
+CreateDate, that is used to cluster images.  For me, the optimum value
+seems to be 36 hours, though this is configurable via the command line.
+
+This took me an afternoon to pull together, I'm sure it could be
+smarter, but it is useful enough to post for others to use.
+
+=head1 OPTIONS
+
+=over 2
+
+=item B<-d directory>
+
+Set the target directory for images.  Defaults to /tmp/photos, which
+is probably not what you want.
+
+=item B<-D>
+
+Dryrun.  Tells you what the program would have done.
+
+=item B<-h>
+
+Print out help message
+
+=item B<-s>
+
+Seperator character.  It defaults to I<:> (i.e. 2005:10:09...), but is
+user configurable because my friend Clemens wants to use I<->
+(i.e. 2005-10-09) instead.
+
+=item B<-t>
+
+Set the tollerance for image clustering.  This is the maximum time
+between any 2 pictures in a cluster, which will cause a new cluster to
+be created.  The name of the cluster will be YYYY:MM:DD of the first
+image in the cluster, even if it spans multiple days.  Because this
+tollerance is the maximum time between any two images in the cluster,
+it is possible that all images you have ever taken could be in 1
+cluster, if you took a picture every day of your life.  Hence, this
+feature isn't useful to everyone.  If you are that kind of person, set
+tollerance to 16 hours or something, and you'll tend to get 1 day
+sized buckets.
+
+=item B<-v>
+
+Prints verbose output
+
+=back
+
+=head1 TODO
+
+=over 2
+
+=item B<*> 
+
+See how useful this actually is.  On my brief tests reorganizing my
+own images, it was incredibly useful.
+
+=item B<*>
+
+Create other types of groupings.  My friend Mike takes a picture of
+his son everyday, so really wants some other kind of grouping.
+
+=item B<*>
+
+Add some tests.  There really aren't any at this point.  This would
+require some fake small exif data jpegs, which should be easy enough.
+
+=back
+
+=head1 BUGS
+
+None known at this time.  I've only tested with Canon camera images
+though, so reports working on other versions would be good.
+
+=head1 LICENSE
+
+GPL v2
+
+=head1 AUTHOR
+
+Sean Dague <sean at dague dot net>
+
+=cut
+
+use strict;
+use Image::ExifTool 'ImageInfo';
+use Time::Local;
+use Data::Dumper;
+use Getopt::Std;
+use File::Copy;
+use File::Path;
+
+our $VERSION = 0.1;
+
+our %opts;
+
+getopts("vDhd:s:t:",\%opts);
+
+if($opts{h}) {
+    usage();
+    exit(1);
+}
+
+my $topdir = $opts{d} || "/tmp/photos";
+my $tolerance = $opts{t} || 36;
+my $verbose = $opts{v};
+my $dryrun = $opts{D};
+my $sep = $opts{s} || ':';
+my $bigsep = '_';
+
+my $data = get_file_info(@ARGV);
+my $array = cluster($tolerance, $data);
+moves($array, $data);
+
+
+sub usage {
+    print <<END;
+Usage: imagecluster [options] file file file...
+
+Options:
+    -h       : display help
+    -v       : verbose
+    -D       : dryrun, i.e. don't actually copy anything
+    -d dir   : target directory to put images in
+    -t hrs   : gap tollerance, in hours, defaults to 36
+    -s sep   : seperator character between dates, defaults to ':'
+END
+}
+
+sub get_file_info {
+    my @files = @_;
+    my $data = {};
+ 
+    foreach my $file (@files) {
+        my $options = ImageInfo($file, 'CreateDate', 'FileNumber');
+        
+        if($options->{CreateDate} =~ /^(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)$/) {
+            my ($year, $m, $d, $H, $M, $S) = ($1, $2, $3, $4, $5, $6);
+            my $time = timelocal($S,$M,$H,$d,$m - 1, $year - 1900);
+            my $newfile = join($bigsep,
+                               (
+                                join($sep,($year,$m,$d)),
+                                join($sep,($H,$M,$S)),
+                                $options->{FileNumber}
+                               ));
+            
+            $data->{$newfile} = {
+                                 time => $time,
+                                 create => $options->{CreateDate},
+                                 file => $file,
+                                 num => $options->{FileNumber}
+                                };
+        }
+    }
+    return $data;
+}
+
+
+sub moves {
+    my $array = shift;
+    my $data = shift;
+    
+    for(my $i = 0; $i < scalar(@{$array}); $i++) {
+        my $first = $array->[$i]->[0];
+        $first =~ s/_.*//;
+        my $dir = "$topdir/$first";
+        verbose("mkpath $dir");
+        unless($dryrun) {
+            mkpath($dir);
+        }
+
+        foreach my $item (@{$array->[$i]}) {
+            my $oldfile = $data->{$item}->{file};
+            my $new = $dir . "/$item.jpg";
+            verbose("copy $oldfile $new");
+            unless($dryrun) {
+               copy($oldfile, $new);
+            }
+        }
+    }
+}
+
+sub verbose {
+    my $line = shift;
+    if($verbose) {
+        print $line,"\n";
+    }
+}
+
+sub cluster {
+    my $offset = shift;
+    my $data = shift;
+    
+    $offset *= 60*60; # convert from hours to seconds
+    my $array = [];
+    my $cluster = -1;
+    my $last = 0;
+    foreach my $key (sort {$data->{$a}->{time} <=> $data->{$b}->{time}} keys %{$data}) {
+        my $time = $data->{$key}->{time};
+        if(($time - $offset) > $last) {
+            $cluster++;
+        }
+        $last = $time;
+        push @{$array->[$cluster]}, $key;
+    }
+    return $array;
+}
+
